@@ -1,15 +1,12 @@
 # components/RFP_document.py
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from fastapi.responses import JSONResponse
-import pdfplumber
-import docx
+from sqlalchemy.orm import Session
+import pdfplumber, docx, io, os, json, subprocess, traceback, re
 from PIL import Image
 import pytesseract
-import subprocess
-import json
-import traceback
-import os
-import io
+from database import get_db
+from model import BidCompany
 
 router = APIRouter()
 
@@ -29,241 +26,371 @@ print("Ollama exists:", os.path.exists(OLLAMA_BIN))
 print("=" * 50)
 
 # --------------------------------------------------
-# Text Extraction Functions
+# Text Extraction
 # --------------------------------------------------
 async def extract_text(file: UploadFile) -> str:
-    """Extract text from uploaded file"""
     try:
-        # Read file content
         content = await file.read()
         await file.seek(0)
-        
-        filename_lower = file.filename.lower()
+        fname = file.filename.lower()
 
-        # PDF extraction
-        if filename_lower.endswith(".pdf"):
+        if fname.endswith(".pdf"):
             with pdfplumber.open(io.BytesIO(content)) as pdf:
-                text_parts = []
-                for page in pdf.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        text_parts.append(page_text)
-                return "\n".join(text_parts)
-
-        # DOCX extraction
-        elif filename_lower.endswith(".docx"):
+                return "\n".join([p.extract_text() or "" for p in pdf.pages])
+        elif fname.endswith(".docx"):
             doc = docx.Document(io.BytesIO(content))
-            return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
-
-        # Image extraction (OCR)
-        elif filename_lower.endswith((".png", ".jpg", ".jpeg")):
-            image = Image.open(io.BytesIO(content))
-            return pytesseract.image_to_string(image)
-
-        # Plain text
+            return "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+        elif fname.endswith((".png", ".jpg", ".jpeg")):
+            img = Image.open(io.BytesIO(content))
+            return pytesseract.image_to_string(img)
         else:
             return content.decode("utf-8", errors="ignore")
-
     except Exception as e:
-        print(f"❌ Extraction error: {str(e)}")
+        print(f"❌ Extraction error: {e}")
         raise HTTPException(500, f"Text extraction failed: {str(e)}")
 
-
 # --------------------------------------------------
-# Ollama Integration (CORRECTED)
+# Ollama Integration
 # --------------------------------------------------
 def call_ollama(prompt_text: str) -> dict:
-    """
-    Call Ollama using correct command structure
-    """
     try:
-        # CORRECTED: Use "run" command, not "generate"
-        cmd = [
-            OLLAMA_BIN,
-            "run",
-            MODEL_NAME,
-            prompt_text
-        ]
-
-        print(f"🚀 Executing Ollama command...")
-        print(f"Model: {MODEL_NAME}")
-
+        cmd = [OLLAMA_BIN, "run", MODEL_NAME, prompt_text]
         result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT,
-            encoding='utf-8',
-            errors='ignore'
+            cmd, capture_output=True, text=True, timeout=TIMEOUT,
+            encoding='utf-8', errors='ignore'
         )
 
-        # Check for command errors
         if result.returncode != 0:
-            error_msg = result.stderr.strip() or "Unknown error"
-            print(f"❌ Ollama command failed: {error_msg}")
-            raise HTTPException(500, f"Ollama error: {error_msg}")
+            print(f"❌ Ollama stderr: {result.stderr}")
+            raise HTTPException(500, f"Ollama error: {result.stderr.strip()}")
 
-        # Get raw output
         raw_output = result.stdout.strip()
+        print("=" * 80)
+        print("RAW OLLAMA OUTPUT:")
+        print(raw_output)
+        print("=" * 80)
         
-        if not raw_output:
-            raise HTTPException(500, "Ollama returned empty response")
-
-        print(f"📤 Ollama response length: {len(raw_output)} chars")
-        print(f"First 200 chars: {raw_output[:200]}")
-
-        # Extract and parse JSON
-        try:
-            json_data = extract_json_from_response(raw_output)
-            print("✅ Successfully parsed JSON")
-            return json_data
-            
-        except json.JSONDecodeError as je:
-            print(f"❌ JSON parsing failed: {str(je)}")
-            print(f"Raw output: {raw_output[:500]}")
-            
-            # Return error with raw output for debugging
-            raise HTTPException(
-                500,
-                f"Invalid JSON from Ollama. Error: {str(je)}. Output: {raw_output[:200]}"
-            )
-
+        json_data = extract_json_from_response(raw_output)
+        
+        print("=" * 80)
+        print("PARSED JSON:")
+        print(json.dumps(json_data, indent=2))
+        print("=" * 80)
+        
+        return json_data
     except subprocess.TimeoutExpired:
-        print(f"❌ Ollama timeout after {TIMEOUT}s")
-        raise HTTPException(504, f"Ollama timed out after {TIMEOUT} seconds")
-    
+        raise HTTPException(504, f"Ollama timed out after {TIMEOUT}s")
     except FileNotFoundError:
-        print(f"❌ Ollama binary not found at: {OLLAMA_BIN}")
         raise HTTPException(500, f"Ollama not found at {OLLAMA_BIN}")
-    
-    except HTTPException:
-        raise
-    
     except Exception as e:
-        print(f"❌ Unexpected error: {str(e)}")
-        raise HTTPException(500, f"Ollama call failed: {str(e)}")
-
+        print(f"❌ Ollama call exception: {e}")
+        raise
 
 def extract_json_from_response(text: str) -> dict:
-    """
-    Extract JSON from Ollama response that might contain extra text
-    """
-    # Remove markdown code blocks
+    """Enhanced JSON extraction with multiple fallback strategies"""
+    
+    original_text = text
+    
+    # Strategy 1: Remove markdown code blocks
     if "```json" in text:
-        start = text.find("```json") + 7
-        end = text.find("```", start)
-        if end != -1:
-            text = text[start:end].strip()
+        match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if match:
+            text = match.group(1)
+            print("✓ Extracted from ```json block")
     elif "```" in text:
-        start = text.find("```") + 3
-        end = text.find("```", start)
-        if end != -1:
-            text = text[start:end].strip()
+        match = re.search(r'```\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if match:
+            text = match.group(1)
+            print("✓ Extracted from ``` block")
     
-    # Find the first { and last }
-    first_brace = text.find("{")
-    last_brace = text.rfind("}")
+    # Strategy 2: Extract content between first { and last }
+    first = text.find("{")
+    last = text.rfind("}")
+    if first != -1 and last != -1 and last > first:
+        text = text[first:last+1]
+        print(f"✓ Extracted JSON from position {first} to {last}")
     
-    if first_brace != -1 and last_brace != -1:
-        text = text[first_brace:last_brace + 1]
+    # Strategy 3: Clean up common issues
+    text = text.strip()
     
-    # Parse JSON
-    return json.loads(text)
-
+    # Remove trailing commas before closing braces/brackets
+    text = re.sub(r',(\s*[}\]])', r'\1', text)
+    
+    # Try to parse
+    try:
+        parsed = json.loads(text)
+        print("✓ Successfully parsed JSON")
+        return parsed
+    except json.JSONDecodeError as e:
+        print(f"❌ First parse attempt failed: {e}")
+        print(f"❌ Attempting to parse: {text[:200]}...")
+        
+        # Strategy 4: Try to fix common JSON issues
+        # Remove comments
+        text = re.sub(r'//.*?\n|/\*.*?\*/', '', text, flags=re.DOTALL)
+        
+        # Try parsing again
+        try:
+            parsed = json.loads(text)
+            print("✓ Successfully parsed after cleanup")
+            return parsed
+        except json.JSONDecodeError as e2:
+            # Strategy 5: Return a default structure if all else fails
+            print("=" * 80)
+            print("⚠️ ALL PARSING FAILED - RETURNING DEFAULT")
+            print(f"Original output length: {len(original_text)}")
+            print(f"Original output preview: {original_text[:500]}")
+            print("=" * 80)
+            
+            return {
+                "rfp_summary": {
+                    "title": "Unable to parse",
+                    "client_name": "Unknown",
+                    "industry": "Unknown",
+                    "contract_type": "Unknown",
+                    "estimated_value_usd": None,
+                    "duration_months": None,
+                    "submission_deadline": None
+                },
+                "requirements": {
+                    "technical": ["Parse error - check RFP manually"],
+                    "compliance": []
+                },
+                "_parse_error": str(e2),
+                "_original_output_preview": original_text[:500]
+            }
 
 # --------------------------------------------------
-# Create Optimized Prompt
+# Fetch Company Data
 # --------------------------------------------------
-def create_analysis_prompt(rfp_text: str) -> str:
-    """
-    Create a well-structured prompt for RFP analysis
-    """
-    # Limit text to avoid token limits
-    max_chars = 6000
-    if len(rfp_text) > max_chars:
-        rfp_text = rfp_text[:max_chars] + "\n... [text truncated for analysis]"
+def fetch_company_data(db: Session, company_id: int = 1):
+    company = db.query(BidCompany).filter(BidCompany.bid_company == company_id).first()
+    if not company:
+        raise HTTPException(404, "BidCompany not found")
     
-    return f"""You are an expert RFP analysis system. Analyze this RFP document and extract structured information.
+    # Map database fields correctly based on your schema
+    data = {
+        "org_id": company.org_id,
+        "capability_level": company.capability_level,  # VARCHAR - e.g., "High"
+        "project_experience": company.project_experience,  # INTEGER - e.g., 8 (years)
+        "certifications": company.certifications_held,  # VARCHAR - e.g., "ISO 9001"
+        "team_availability": company.team_availability,  # INTEGER - e.g., 70
+        "domain_experience": company.domain_experience,  # VARCHAR - e.g., "Healthcare IT"
+        "project_duration": company.project_duration,  # INTEGER - e.g., 18 (months)
+        "deal_size_range": company.deal_size_range,  # VARCHAR - e.g., "2M-25M"
+        "types_worked_with": company.types_worked_with  # VARCHAR - e.g., "Government"
+    }
+    
+    print("=" * 80)
+    print("COMPANY DATA:")
+    print(json.dumps(data, indent=2, default=str))
+    print("=" * 80)
+    
+    return data
 
-CRITICAL INSTRUCTIONS:
-1. Return ONLY valid JSON - no markdown, no explanations, no extra text
-2. Use the exact structure provided below
-3. If information is missing, use null or empty arrays
-4. Do not add any text before or after the JSON
+# --------------------------------------------------
+# Complete Bid Evaluation Scores
+# --------------------------------------------------
+def compute_bid_evaluation(company_data: dict, rfp_data: dict) -> dict:
+    scores = {}
+    
+    print("=" * 80)
+    print("COMPUTING BID EVALUATION")
+    print(f"Company Data: {company_data}")
+    print(f"RFP Industry: {rfp_data.get('rfp_summary', {}).get('industry')}")
+    print(f"RFP Duration: {rfp_data.get('rfp_summary', {}).get('duration_months')}")
+    print("=" * 80)
 
-RFP DOCUMENT TEXT:
-{rfp_text}
+    # --- 1. Certifications Match ---
+    required_certs = ["ISO 9001", "ISO 27001", "HIPAA", "SOC 2"]
+    cert_input = str(company_data.get("certifications", ""))
+    certs = [c.strip() for c in cert_input.split(",") if c.strip()]
+    
+    cert_score = 0
+    matched_certs = 0
+    for c in certs:
+        if any(req in c for req in required_certs):
+            cert_score += 30
+            matched_certs += 1
+    
+    # Bonus for multiple certifications
+    if matched_certs >= 3:
+        cert_score = 95
+    elif matched_certs == 2:
+        cert_score = 75
+    elif matched_certs == 1:
+        cert_score = 60
+    else:
+        cert_score = 30
+    
+    scores["certifications_match"] = cert_score
 
-Required JSON structure (return this exact format):
+    # --- 2. Domain Experience (VARCHAR field like "Healthcare IT") ---
+    domain_exp_str = str(company_data.get("domain_experience", "")).lower()
+    rfp_industry = str(rfp_data.get("rfp_summary", {}).get("industry", "")).lower()
+    
+    # Check if domain matches RFP industry
+    if rfp_industry and rfp_industry in domain_exp_str:
+        scores["domain_experience"] = 95
+    elif any(word in domain_exp_str for word in ["healthcare", "finance", "government", "technology"]):
+        scores["domain_experience"] = 75
+    else:
+        scores["domain_experience"] = 50
+
+    # --- 3. Team Availability (INTEGER 0-100) ---
+    try:
+        team_avail = int(company_data.get("team_availability", 0))
+    except (ValueError, TypeError):
+        team_avail = 0
+    scores["team_availability"] = min(max(team_avail, 0), 100)
+
+    # --- 4. Technical Match (based on capability_level VARCHAR) ---
+    capability = str(company_data.get("capability_level", "")).lower()
+    if "high" in capability or "advanced" in capability or "expert" in capability:
+        scores["technical_match"] = 90
+    elif "medium" in capability or "intermediate" in capability:
+        scores["technical_match"] = 70
+    elif "low" in capability or "basic" in capability:
+        scores["technical_match"] = 50
+    else:
+        scores["technical_match"] = 60
+
+    # --- 5. Past Project Similarity (based on project_experience INTEGER - years) ---
+    try:
+        project_years = int(company_data.get("project_experience", 0))
+    except (ValueError, TypeError):
+        project_years = 0
+    
+    if project_years >= 10:
+        scores["past_project_similarity"] = 90
+    elif project_years >= 5:
+        scores["past_project_similarity"] = 75
+    elif project_years >= 3:
+        scores["past_project_similarity"] = 60
+    else:
+        scores["past_project_similarity"] = 40
+
+    # --- 6. Timeline Feasibility ---
+    try:
+        company_duration = int(company_data.get("project_duration", 0))
+        rfp_dur = rfp_data.get("rfp_summary", {}).get("duration_months")
+        rfp_duration = int(rfp_dur) if rfp_dur else 0
+        
+        if rfp_duration > 0:
+            if company_duration >= rfp_duration:
+                scores["timeline_feasibility"] = 90
+            elif company_duration >= rfp_duration * 0.75:
+                scores["timeline_feasibility"] = 70
+            else:
+                scores["timeline_feasibility"] = 50
+        else:
+            # No RFP duration specified, use company capability
+            if company_duration >= 12:
+                scores["timeline_feasibility"] = 80
+            else:
+                scores["timeline_feasibility"] = 60
+    except (ValueError, TypeError):
+        scores["timeline_feasibility"] = 60
+
+    # --- 7. Deal Size Fit (VARCHAR like "2M-25M") ---
+    deal_size = str(company_data.get("deal_size_range", "")).lower()
+    
+    try:
+        rfp_val = rfp_data.get("rfp_summary", {}).get("estimated_value_usd")
+        rfp_value = int(rfp_val) if rfp_val else 0
+    except (ValueError, TypeError):
+        rfp_value = 0
+    
+    # Parse deal size range
+    if "m" in deal_size or "million" in deal_size:
+        if "25" in deal_size or "20" in deal_size or "30" in deal_size:
+            scores["deal_size_fit"] = 85
+        elif "10" in deal_size or "15" in deal_size:
+            scores["deal_size_fit"] = 75
+        else:
+            scores["deal_size_fit"] = 70
+    elif "k" in deal_size or "thousand" in deal_size:
+        scores["deal_size_fit"] = 60
+    else:
+        scores["deal_size_fit"] = 70
+
+    # --- 8. Client Type Familiarity (VARCHAR like "Government") ---
+    types_worked = str(company_data.get("types_worked_with", "")).lower()
+    rfp_industry = str(rfp_data.get("rfp_summary", {}).get("industry", "")).lower()
+    rfp_client = str(rfp_data.get("rfp_summary", {}).get("client_name", "")).lower()
+    
+    # Check if client type matches
+    match_score = 50  # default
+    
+    if rfp_industry and rfp_industry in types_worked:
+        match_score = 95
+    elif any(client_type in types_worked for client_type in ["government", "healthcare", "finance", "enterprise"]):
+        if any(client_type in rfp_client or client_type in rfp_industry 
+               for client_type in ["government", "healthcare", "finance", "enterprise"]):
+            match_score = 85
+        else:
+            match_score = 70
+    elif types_worked:
+        match_score = 60
+    
+    scores["client_type_familiarity"] = match_score
+
+    print("FINAL SCORES:")
+    print(json.dumps(scores, indent=2))
+    print("=" * 80)
+    
+    return scores
+
+# --------------------------------------------------
+# Upload RFP & Analyze
+# --------------------------------------------------
+@router.post("/api/rfp/upload")
+async def fileupload(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    try:
+        rfp_text = await extract_text(file)
+        if not rfp_text.strip(): 
+            raise HTTPException(400, "Text too short")
+        
+        print(f"✓ Extracted {len(rfp_text)} characters from RFP")
+
+        company_data = fetch_company_data(db)
+
+        # Simplified, more direct prompt
+        prompt = f"""Extract RFP information and return ONLY valid JSON (no text before or after).
+
 {{
   "rfp_summary": {{
-    "title": "extracted project or RFP title",
-    "client_name": "organization issuing the RFP",
-    "industry": "industry sector",
-    "contract_type": "contract type (e.g., Fixed Price, T&M)",
-    "estimated_value_usd": null,
-    "duration_months": null,
-    "submission_deadline": "YYYY-MM-DD format or null"
+    "title": "project title from document",
+    "client_name": "issuing organization",
+    "industry": "industry/sector",
+    "contract_type": "Fixed Price or T&M or Cost Plus",
+    "estimated_value_usd": 0,
+    "duration_months": 0,
+    "submission_deadline": "2025-01-01"
   }},
   "requirements": {{
-    "technical": ["technical requirement 1", "technical requirement 2"],
-    "compliance": ["compliance requirement 1", "compliance requirement 2"]
+    "technical": ["req1", "req2"],
+    "compliance": ["comp1", "comp2"]
   }}
 }}
 
-Return ONLY the JSON object:"""
+RFP:
+{rfp_text[:2500]}"""
 
-
-# --------------------------------------------------
-# Main Upload Endpoint
-# --------------------------------------------------
-@router.post("/api/rfp/upload")
-async def fileupload(file: UploadFile = File(...)):
-    """
-    Upload and analyze RFP document
-    Supports: PDF, DOCX, TXT, Images (PNG, JPG, JPEG)
-    """
-    try:
-        print(f"\n{'='*60}")
-        print(f"📄 Processing file: {file.filename}")
-        print(f"{'='*60}")
-
-        # Step 1: Extract text
-        rfp_text = await extract_text(file)
-        
-        if not rfp_text or len(rfp_text.strip()) < 50:
-            raise HTTPException(400, "Extracted text is too short or empty")
-        
-        print(f"✅ Extracted {len(rfp_text)} characters")
-
-        # Step 2: Create prompt
-        prompt = create_analysis_prompt(rfp_text)
-
-        # Step 3: Analyze with Ollama
-        print("🤖 Analyzing with Ollama...")
         result_json = call_ollama(prompt)
+        bid_evaluation = compute_bid_evaluation(company_data, result_json)
 
-        print("✅ Analysis complete!")
-        print(f"{'='*60}\n")
-
-        # Return result to frontend
-        return JSONResponse(content=result_json)
-
-    except HTTPException as he:
-        print(f"❌ HTTP Exception: {he.status_code} - {he.detail}")
-        return JSONResponse(
-            status_code=he.status_code,
-            content={"error": he.detail}
-        )
+        return JSONResponse(content={
+            "rfp_extracted_json": result_json,
+            "bid_evaluation": bid_evaluation
+        })
 
     except Exception as e:
-        print(f"❌ Unexpected error: {str(e)}")
+        print("=" * 80)
+        print("EXCEPTION IN UPLOAD:")
         print(traceback.format_exc())
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"Internal server error: {str(e)}"}
-        )
-
+        print("=" * 80)
+        raise HTTPException(500, str(e))
 
 # --------------------------------------------------
 # Test Endpoint
@@ -272,27 +399,21 @@ async def fileupload(file: UploadFile = File(...)):
 def test_ollama():
     """Test Ollama connection"""
     try:
-        print("\n🧪 Testing Ollama connection...")
-        
-        test_prompt = """Return ONLY this JSON with no extra text:
-{"status": "success", "message": "Ollama is working correctly"}"""
-        
+        test_prompt = 'Return only this JSON: {"status": "success", "message": "working"}'
         result = call_ollama(test_prompt)
-        
         return {
             "ollama_status": "connected",
             "ollama_path": OLLAMA_BIN,
             "model": MODEL_NAME,
             "test_response": result
         }
-        
     except Exception as e:
         return {
             "ollama_status": "error",
             "ollama_path": OLLAMA_BIN,
-            "error": str(e)
+            "error": str(e),
+            "traceback": traceback.format_exc()
         }
-
 
 @router.get("/api/rfp/health")
 def health_check():

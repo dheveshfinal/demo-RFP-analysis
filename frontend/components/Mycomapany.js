@@ -1,77 +1,153 @@
+"use client";
+import { useState } from "react";
+
 const Mycompany = () => {
+  const [formData, setFormData] = useState({
+    technicalCapability: "",
+    pastExperience: "",
+    certifications: "",
+    teamAvailability: "",
+    domainExperience: "",
+    maxDuration: "",
+    dealSizeRange: "",
+    clientType: ""
+  });
+
+  // Handle input/select changes
+  const handleChange = (e) => {
+    const { name, value } = e.target;
+    setFormData((prev) => ({
+      ...prev,
+      [name]: value
+    }));
+  };
+
+  // Handle form submission
+  const handleSubmit = async (e) => {
+  e.preventDefault();
+
+  try {
+    const response = await fetch("http://localhost:8000/mycompanydata", {
+      method: "POST",
+      body: JSON.stringify(formData)
+    });
+
+    const result = await response.json();
+    console.log(result);
+  } catch (error) {
+    console.error("Error:", error);
+  }
+};
+
   return (
     <div style={styles.container}>
       <h2 style={styles.title}>Bidding Company Profile</h2>
 
-      {/* 1. Technical Requirements Match */}
       <div style={styles.card}>
         <label style={styles.label}>1. Technical Capability Level</label>
-        <select style={styles.input}>
-          <option>High</option>
-          <option>Medium</option>
-          <option>Low</option>
+        <select
+          name="technicalCapability"
+          value={formData.technicalCapability}
+          onChange={handleChange}
+          style={styles.input}
+        >
+          <option value="">Select</option>
+          <option value="High">High</option>
+          <option value="Medium">Medium</option>
+          <option value="Low">Low</option>
         </select>
       </div>
 
-      {/* 2. Past Project Similarity */}
       <div style={styles.card}>
         <label style={styles.label}>2. Past Project Experience (Years)</label>
-        <input type="number" placeholder="e.g. 8" style={styles.input} />
+        <input
+          type="number"
+          name="pastExperience"
+          value={formData.pastExperience}
+          onChange={handleChange}
+          placeholder="e.g. 8"
+          style={styles.input}
+        />
       </div>
 
-      {/* 3. Certifications Match */}
       <div style={styles.card}>
         <label style={styles.label}>3. Certifications Held</label>
         <input
           type="text"
+          name="certifications"
+          value={formData.certifications}
+          onChange={handleChange}
           placeholder="ISO 9001, ISO 27001, HIPAA"
           style={styles.input}
         />
       </div>
 
-      {/* 4. Team Availability */}
       <div style={styles.card}>
         <label style={styles.label}>4. Team Availability (%)</label>
-        <input type="number" placeholder="e.g. 70" style={styles.input} />
+        <input
+          type="number"
+          name="teamAvailability"
+          value={formData.teamAvailability}
+          onChange={handleChange}
+          placeholder="e.g. 70"
+          style={styles.input}
+        />
       </div>
 
-      {/* 5. Domain Experience */}
       <div style={styles.card}>
         <label style={styles.label}>5. Domain Experience</label>
         <input
           type="text"
+          name="domainExperience"
+          value={formData.domainExperience}
+          onChange={handleChange}
           placeholder="Healthcare IT, Government Systems"
           style={styles.input}
         />
       </div>
 
-      {/* 6. Timeline Feasibility */}
       <div style={styles.card}>
         <label style={styles.label}>6. Maximum Project Duration (Months)</label>
-        <input type="number" placeholder="e.g. 18" style={styles.input} />
+        <input
+          type="number"
+          name="maxDuration"
+          value={formData.maxDuration}
+          onChange={handleChange}
+          placeholder="e.g. 18"
+          style={styles.input}
+        />
       </div>
 
-      {/* 7. Deal Size Fit */}
       <div style={styles.card}>
         <label style={styles.label}>7. Preferred Deal Size Range</label>
         <input
           type="text"
+          name="dealSizeRange"
+          value={formData.dealSizeRange}
+          onChange={handleChange}
           placeholder="2M – 25M"
           style={styles.input}
         />
       </div>
 
-      {/* 8. Client Type Familiarity */}
       <div style={styles.card}>
         <label style={styles.label}>8. Client Types Worked With</label>
-        <select style={styles.input}>
-          <option>Government</option>
-          <option>Private</option>
-          <option>Both</option>
+        <select
+          name="clientType"
+          value={formData.clientType}
+          onChange={handleChange}
+          style={styles.input}
+        >
+          <option value="">Select</option>
+          <option value="Government">Government</option>
+          <option value="Private">Private</option>
+          <option value="Both">Both</option>
         </select>
       </div>
 
-      <button style={styles.button}>Save Company Profile</button>
+      <button style={styles.button} onClick={handleSubmit}>
+        Save Company Profile
+      </button>
     </div>
   );
 };

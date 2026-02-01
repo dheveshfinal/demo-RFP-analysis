@@ -32,7 +32,7 @@ export default function DashboardPage() {
     { name: "Settings", icon: Settings }
   ];
 
-  const rendertomycompany = () => {
+  const navigateToMyCompany = () => {
     router.push("/mycompany");
   };
 
@@ -41,10 +41,7 @@ export default function DashboardPage() {
   };
 
   const uploadRFP = async () => {
-    if (!file) {
-      alert("Please select a file");
-      return;
-    }
+    if (!file) return alert("Please select a file");
 
     const formData = new FormData();
     formData.append("file", file);
@@ -60,8 +57,8 @@ export default function DashboardPage() {
 
       const data = await res.json();
 
-      // 🔥 Store ONLY model output
-      setLlmOutput(data.output || data.result || data);
+      // Store only the analysis JSON or fallback to raw output
+      setLlmOutput(data || data.result || data.output);
 
     } catch (err) {
       console.error(err);
@@ -114,7 +111,7 @@ export default function DashboardPage() {
 
           <div className="flex items-center gap-6">
             <button
-              onClick={rendertomycompany}
+              onClick={navigateToMyCompany}
               className="border rounded-lg px-3 py-2 text-sm"
             >
               Acme Corp
@@ -133,20 +130,18 @@ export default function DashboardPage() {
 
         {/* Content */}
         <div className="p-6 space-y-6">
-          {/* Upload */}
+          {/* Upload RFP */}
           <div className="bg-white rounded-xl border p-6">
             <h2 className="font-semibold mb-4">Upload New RFP</h2>
 
             <div className="border-2 border-dashed rounded-xl p-8 text-center">
               <Upload className="mx-auto h-8 w-8 text-gray-400 mb-3" />
-
               <input
                 type="file"
-                accept=".pdf,.docx,.xlsx"
+                accept=".pdf,.docx,.txt,.png,.jpg,.jpeg"
                 onChange={handleFileChange}
                 className="mb-4"
               />
-
               <button
                 onClick={uploadRFP}
                 disabled={loading}
@@ -157,20 +152,18 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* 🔥 LLM OUTPUT DISPLAY */}
+          {/* LLM OUTPUT */}
           <div className="bg-white rounded-xl border p-6 min-h-[260px] overflow-auto">
             {loading && (
               <p className="text-gray-400 text-center">
                 Analyzing RFP with AI...
               </p>
             )}
-
             {!loading && !llmOutput && (
               <p className="text-gray-400 text-center">
                 AI analysis will appear here
               </p>
             )}
-
             {!loading && llmOutput && (
               <pre className="whitespace-pre-wrap text-sm text-gray-800">
                 {typeof llmOutput === "string"
